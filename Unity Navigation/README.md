@@ -6,8 +6,7 @@ cloud API dependency (Section 6.3.1).
 
 For the whole-project setup (worlds and navigation together), see the [repository README](../README.md); the worlds themselves are documented in [`Unity Environments/`](../Unity%20Environments/README.md).
 
-This pass wires up the whole loop **except real speech input** — see
-[`ROVRDebugConsole.cs`](ROVRDebugConsole.cs) for why, and what to swap in later.
+Voice input works through a local Whisper server (see [`Voice Server/`](../Voice%20Server/README.md)); typed commands go through the same pipeline.
 
 ## How a command flows
 
@@ -31,7 +30,11 @@ utterance
 | `MovementHabits.cs` | How far "a bit" is: starts at 0.5 m, adapts to the user, resets per participant. |
 | `NavigationController.cs` | Movement: fixed speed, smooth stop at a target, instant 90° snap-turns about the head, "turn until you see X", blocked detection. |
 | `SemanticIntentResolver.cs` | Orchestrates all of it and enforces the rules below in code. |
-| `ROVRDebugConsole.cs` | OnGUI text box standing in for voice input. |
+| `VoiceInput.cs` | Voice input: microphone -> voice-activity detector -> Whisper -> `SemanticIntentResolver`. Always listening, with push-to-talk as a fallback. |
+| `VoiceActivityDetector.cs` | Finds where each spoken utterance starts and ends, so Whisper only ever sees speech. Learns the background noise level. |
+| `WhisperClient.cs` | HTTP client for the local Whisper server (`Voice Server/`). |
+| `AudioUtil.cs`, `TranscriptFilter.cs` | WAV encoding and resampling; drops Whisper's non-speech annotations and stock hallucinations ("Thank you."). |
+| `ROVRDebugConsole.cs` | On-screen box: typed commands, plus the microphone state and what was heard. |
 
 ## Setup
 
@@ -52,7 +55,8 @@ utterance
    - `SemanticIntentResolver` (it finds the other three on the same object)
    - `ROVRDebugConsole` (wire its `resolver` field)
 6. Generate the worlds (`Unity Environments/`). The tags the LLM can see are set by `groundedTags` on `FOVMetadataGrounding` — by default **Wall, Door, Chair, Tree**. Furniture and Goal are deliberately left out (Thesis 7.1.2: the House's metadata is doors, walls and chairs; the maze has no semantic objects). Add a tag to that list to expose it.
-7. Enter Play mode and type commands, e.g. `move forward 5 meters`, `move forward until you reach the door`, `a bit more`, `turn around until you see the tree`, `stop`.
+7. **Voice (optional):** start the Whisper server (`Voice Server/start.ps1`), add `WhisperClient` and `VoiceInput` to the same object, and set the `voice` field of `ROVRDebugConsole`. The microphone is then always listening; set `VoiceInput`'s mode to push-to-talk in a noisy room and call `BeginPushToTalk()` / `EndPushToTalk()` from your own input (the debug console has a "Hold to talk" button). Start it while the room is quiet: the detector learns the background level in its first half second.
+8. Enter Play mode and type or speak commands, e.g. `move forward 5 meters`, `move forward until you reach the door`, `a bit more`, `turn around until you see the tree`, `stop`.
 
 Call `SemanticIntentResolver.ResetSession()` between participants: it clears the previous command and resets "a bit" to 0.5 m.
 
@@ -75,8 +79,10 @@ Verified end to end with `gemma3n:e4b` through the real `OllamaClient`, driving 
 
 ## Known gaps / next steps
 
-- **No real voice input yet.** `ROVRDebugConsole` is a deliberate stand-in — next is Unity `Microphone` capture feeding speech-to-text (or native audio to Ollama's multimodal endpoint, if Ollama supports audio for Gemma 3n — verify before relying on it) ahead of `SubmitUtterance`.
-- **Interrupt Module works on a complete string**, not a live stream (Section 5.5.2 assumes a halt can land mid-utterance). Swap in a streaming check once real ASR exists.
+- **Voice is untested with a real microphone or headset.** The microphone capture, the push-to-talk button and the headset's 48 kHz audio path were not exercised (no microphone available); everything downstream was tested with recorded and synthesized speech fed in as audio.
+- **Halts are slow by voice.** The Interrupt Module only acts once the whole utterance is transcribed: about 1.2–1.5 s from the start of "stop", during which the avatar moves about 2.5 m. Section 5.5.2 assumes a halt can land mid-utterance. Planned next step: an always-on halt-word detector (or an early transcription of the first half second) that stops the avatar without waiting.
+- **The voice-activity detector is energy-based**, not a speech model. It handles steady background noise, but a loud non-speech sound (a door slam) can still be sent to Whisper; its output is then filtered out.
+- **Ollama can't take audio** for `gemma3n:e4b`, so the thesis's single-model audio path doesn't work; speech is transcribed by Whisper first.
 - **One conversational gap:** after "which chair?", a reply like "the left one" can't aim at that chair (turns are 90° snaps), and the model sometimes turns left instead of asking the user to face it. The engine's message tells users to face the object and repeat the command, which works.
 - **Prompt-driven behaviour is model-dependent.** It was tuned and tested against `gemma3n:e4b` (41 of 42 scripted commands correct; the one miss is the "the left one" case above). Re-run those checks if you change the model or the prompt.
 - **No controller (joystick) arm yet** for the between-subjects control condition (Section 7.1) — it must move through `CharacterController.Move` with the same step offset, and use the same snap-turn and speed settings.
