@@ -120,6 +120,14 @@ Command: go to the tree (no Tree in the visible objects list)
             pendingClarification = null;
         }
 
+        // Stops movement now and cancels any request still waiting on the LLM, so a late reply can't
+        // restart it. For voice input's early "stop" check, which fires before the sentence is finished.
+        public void HaltNow()
+        {
+            requestId++;
+            controller.Halt();
+        }
+
         public void SubmitUtterance(string utterance)
         {
             if (string.IsNullOrWhiteSpace(utterance)) return;

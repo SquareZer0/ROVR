@@ -28,7 +28,9 @@ namespace ROVR
         // Halts; whatever follows is only kept when it starts with a correction cue.
         static readonly string[] HaltLeads =
         {
-            "hold on", "hang on", "stop", "halt", "cancel", "freeze", "wait", "whoa", "oops", "ops"
+            "hold on", "hang on", "stop", "halt", "cancel", "freeze", "wait", "whoa", "oops", "ops",
+            // Whisper often hears a short "ops" as one of these (seen in testing: "Op stop", "Off stop").
+            "op", "oop", "off"
         };
 
         // "no wait" is itself a correction, so what follows it is always kept.

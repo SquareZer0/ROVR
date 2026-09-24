@@ -6,12 +6,14 @@ cloud API dependency (Section 6.3.1).
 
 For the whole-project setup (worlds and navigation together), see the [repository README](../README.md); the worlds themselves are documented in [`Unity Environments/`](../Unity%20Environments/README.md).
 
-This pass wires up the whole loop **except real speech input** — see
-[`ROVRDebugConsole.cs`](ROVRDebugConsole.cs) for why, and what to swap in later.
+On this branch the scripts live in `Assets/ROVR/`. Voice comes from whisper.unity through `Assets/STT/WhisperVoiceMovement.cs`, and every sentence goes through the same pipeline as typed commands.
 
 ## How a command flows
 
 ```
+speech -> whisper.unity -> VoiceCommandRouter   (typed commands skip this)
+            sentence in progress: leading "stop" / "wait" / "ops" halts right away
+            finished sentence: cleaned, de-duplicated, then:
 utterance
   -> InterruptModule        "stop" / "wait, I mean left": halts NOW, bypassing the LLM
   -> FOVMetadataGrounding   raycast matrix over the whole view -> what the user can see
@@ -31,7 +33,10 @@ utterance
 | `MovementHabits.cs` | How far "a bit" is: starts at 0.5 m, adapts to the user, resets per participant. |
 | `NavigationController.cs` | Movement: fixed speed, smooth stop at a target, instant 90° snap-turns about the head, "turn until you see X", blocked detection. |
 | `SemanticIntentResolver.cs` | Orchestrates all of it and enforces the rules below in code. |
-| `ROVRDebugConsole.cs` | OnGUI text box standing in for voice input. |
+| `VoiceCommandRouter.cs` | Routes speech-to-text output: halts early on a leading halt word in the sentence in progress, drops Whisper's noise ("(upbeat music)", "[click]", "Thank you."), drops a sentence reported twice within 1 s, and submits the rest. |
+| `TranscriptFilter.cs` | Strips Whisper's sound annotations and stock hallucinations. |
+| `ROVRDebugConsole.cs` | On-screen box in the Game view: type commands and see replies. |
+| `../STT/WhisperVoiceMovement.cs` | Connects whisper.unity to the pipeline. Listens from the start, keeps the microphone going past its 60 s buffer, and can show what it heard and any question on a UI Text in the headset. |
 
 ## Setup
 
@@ -44,15 +49,14 @@ utterance
    ```bash
    ollama serve
    ```
-4. In Unity, add all the scripts under `Assets/Scripts/ROVR/`.
-5. On a GameObject with a `CharacterController` (your avatar/rig), add:
-   - `FOVMetadataGrounding` (point `pov` at the HMD camera)
-   - `NavigationController` (same `pov`; it finds `FOVMetadataGrounding` on the same object)
-   - `OllamaClient`
-   - `SemanticIntentResolver` (it finds the other three on the same object)
-   - `ROVRDebugConsole` (wire its `resolver` field)
-6. Generate the worlds (`Unity Environments/`). The tags the LLM can see are set by `groundedTags` on `FOVMetadataGrounding` — by default **Wall, Door, Chair, Tree**. Furniture and Goal are deliberately left out (Thesis 7.1.2: the House's metadata is doors, walls and chairs; the maze has no semantic objects). Add a tag to that list to expose it.
-7. Enter Play mode and type commands, e.g. `move forward 5 meters`, `move forward until you reach the door`, `a bit more`, `turn around until you see the tree`, `stop`.
+4. Open `Assets/main.unity` and run **Tools > ROVR > Set Up Voice Navigation**. It finds the player (the object with `WhisperVoiceMovement`) and:
+   - adds and connects `FOVMetadataGrounding`, `NavigationController`, `OllamaClient`, `SemanticIntentResolver` and `ROVRDebugConsole`;
+   - puts the player's feet on the floor and rests its `CharacterController` there (a capsule sunk into the floor jumps up the first time it moves);
+   - puts the XR rig's origin at the feet, so eye height comes from the headset. The old rig put the eye at 3.9 m, above the house's 3 m walls, where the LLM saw nothing.
+
+   Every change is listed in the Console and can be undone. Running it again changes nothing.
+5. Generate the worlds if needed (**Tools > ROVR > Generate All Three Worlds**). The tags the LLM can see are set by `groundedTags` on `FOVMetadataGrounding` — by default **Wall, Door, Chair, Tree**. Furniture and Goal are deliberately left out (Thesis 7.1.2: the House's metadata is doors, walls and chairs; the maze has no semantic objects). Add a tag to that list to expose it.
+6. Enter Play mode and speak, or type commands, e.g. `move forward 5 meters`, `move forward until you reach the door`, `a bit more`, `turn around until you see the tree`, `stop`.
 
 Call `SemanticIntentResolver.ResetSession()` between participants: it clears the previous command and resets "a bit" to 0.5 m.
 
@@ -69,14 +73,17 @@ Call `SemanticIntentResolver.ResetSession()` between participants: it clears the
 
 ## Tested against the real model
 
-Verified end to end with `gemma3n:e4b` through the real `OllamaClient`, driving the avatar in the real worlds: stopping 0.5 m short of a wall and of a chair, asking when several chairs are in view or none are, "a bit" / "a bit more" / "back a bit" adapting, "turn around until you see the tree", and "wait, I mean left" halting instantly then going left. On an RTX 5070 a command takes about **0.6 s** round trip.
+**Voice (this branch):** tested in headless Unity with the real resolver, the real model and a copy of the scene's rig; only whisper.unity's output was simulated, since the package wasn't installed on the test machine. The partial "Stop" halted the player at once, and "stop" said before the LLM answered cancelled that command. Noise from a real session transcript ("(upbeat music)", "[click]") was ignored. Mute and unmute work, and the world-switch panel stops the current move.
+
+**Typed:** verified end to end with `gemma3n:e4b` through the real `OllamaClient`, driving the avatar in the real worlds: stopping 0.5 m short of a wall and of a chair, asking when several chairs are in view or none are, "a bit" / "a bit more" / "back a bit" adapting, "turn around until you see the tree", and "wait, I mean left" halting instantly then going left. On an RTX 5070 a command takes about **0.5 s** round trip.
 
 **Use `127.0.0.1`, not `localhost`, for the Ollama endpoint.** On Windows `localhost` tries IPv6 first and adds about 2 s to every request; the client's default and an automatic rewrite of `localhost` already handle this.
 
 ## Known gaps / next steps
 
-- **No real voice input yet.** `ROVRDebugConsole` is a deliberate stand-in — next is Unity `Microphone` capture feeding speech-to-text (or native audio to Ollama's multimodal endpoint, if Ollama supports audio for Gemma 3n — verify before relying on it) ahead of `SubmitUtterance`.
-- **Interrupt Module works on a complete string**, not a live stream (Section 5.5.2 assumes a halt can land mid-utterance). Swap in a streaming check once real ASR exists.
+- **Voice hasn't been tried with a real microphone or headset.** How early "stop" acts depends on whisper.unity's timing, which couldn't be measured here. `WhisperVoiceMovement` re-transcribes the sentence in progress every 0.5 s (`partialUpdateSec`; whisper.unity's default of 3 s is too slow to catch "stop"). Tune it on the real machine: lower is faster but costs more GPU, which VR rendering also needs.
+- **Ollama can't take audio** for `gemma3n:e4b` ("model does not support multimodal requests"), so speech is transcribed separately, by whisper.unity, before the LLM sees it. This differs from Thesis 6.3.1.
+- **If the LLM answers slower than you speak**, a newer sentence replaces an older unanswered one, so a very fast string of repeats can collapse into fewer moves.
 - **One conversational gap:** after "which chair?", a reply like "the left one" can't aim at that chair (turns are 90° snaps), and the model sometimes turns left instead of asking the user to face it. The engine's message tells users to face the object and repeat the command, which works.
 - **Prompt-driven behaviour is model-dependent.** It was tuned and tested against `gemma3n:e4b` (41 of 42 scripted commands correct; the one miss is the "the left one" case above). Re-run those checks if you change the model or the prompt.
 - **No controller (joystick) arm yet** for the between-subjects control condition (Section 7.1) — it must move through `CharacterController.Move` with the same step offset, and use the same snap-turn and speed settings.

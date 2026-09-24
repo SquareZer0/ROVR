@@ -1,6 +1,20 @@
+// Assets/STT/WhisperVoiceMovement.cs
+// Voice input for ROVR: whisper.unity (speech-to-text inside Unity) feeding the LLM navigation
+// pipeline (SemanticIntentResolver). Speech no longer moves the player directly; every sentence
+// goes through the same pipeline as typed commands, so grounding, clarification questions,
+// "a bit", "until the wall", turning and collision all apply.
+//
+// Class name and the two Whisper fields are unchanged so existing scenes keep their wiring.
+// Run Tools > ROVR > Set Up Voice Navigation once to add and connect the rest.
+//
+// Listening is always on by default. "Stop" is caught early: the sentence in progress is
+// re-transcribed every `partialUpdateSec`, and a leading halt word stops the player before
+// the sentence ends.
 using UnityEngine;
+using UnityEngine.UI;
 using Whisper;
 using Whisper.Utils;
+using ROVR;
 
 public class WhisperVoiceMovement : MonoBehaviour
 {
@@ -8,161 +22,165 @@ public class WhisperVoiceMovement : MonoBehaviour
     public WhisperManager whisperManager;
     public MicrophoneRecord microphoneRecord;
 
-    [Header("Movement References & Settings")]
-    public Transform bodyTransform;
-    public Transform vrCameraTransform;
-    public float moveSpeed = 2f;
-    public float moveDuration = 1f;
+    [Header("ROVR Pipeline")]
+    [Tooltip("Found on this GameObject if left empty.")]
+    public SemanticIntentResolver resolver;
 
-    private WhisperStream _stream;
-    private bool _isListening;
-    private Vector3 _moveDirection = Vector3.zero;
-    private float _moveTimer = 0f;
+    [Header("Listening")]
+    [Tooltip("Start listening as soon as the Whisper model is loaded. Off: call StartListening().")]
+    public bool listenOnStart = true;
 
-    private string _lastCommand = "";
-    private float _commandCooldown = 0f;
+    [Tooltip("Seconds between re-transcriptions of the sentence in progress, which is what lets \"stop\" " +
+             "act early. 0 keeps WhisperManager's own setting (3 s by default, too slow for stopping). " +
+             "Lower is faster to stop but costs more compute.")]
+    public float partialUpdateSec = 0.5f;
 
-    private async void Start()
+    [Header("Optional Feedback")]
+    [Tooltip("A UI Text (e.g. on a world-space canvas) that shows what was heard and any question the system asks.")]
+    public Text statusText;
+
+    public bool IsListening => listening;
+    public string LastHeard => router != null ? router.LastHeard : null;
+
+    WhisperStream stream;
+    VoiceCommandRouter router;
+    bool listening;
+    string heardLine = "", messageLine = "";
+
+    async void Start()
     {
-        if (whisperManager == null || microphoneRecord == null)
+        if (resolver == null) resolver = GetComponent<SemanticIntentResolver>();
+        if (whisperManager == null || microphoneRecord == null || resolver == null)
         {
-            Debug.LogError("[WhisperVoiceMovement] Assign WhisperManager and MicrophoneRecord in the Inspector!");
+            Debug.LogError("[ROVR voice] Needs a WhisperManager, a MicrophoneRecord and a SemanticIntentResolver. " +
+                           "Run Tools > ROVR > Set Up Voice Navigation.");
+            enabled = false;
             return;
         }
 
-        if (bodyTransform == null) bodyTransform = transform;
-        if (vrCameraTransform == null && Camera.main != null) vrCameraTransform = Camera.main.transform;
+        router = new VoiceCommandRouter(resolver.HaltNow, SubmitHeard, () => Time.time);
+        resolver.OnClarificationNeeded += ShowMessage;
+        resolver.OnStatus += ShowMessage;
+        resolver.OnError += ShowMessage;
 
-        _stream = await whisperManager.CreateStream(microphoneRecord);
+        // Keep recording past MicrophoneRecord's 60 s buffer. Without this the microphone stops after
+        // a minute, and whisper.unity stops the whole stream with it.
+        microphoneRecord.loop = true;
+        if (partialUpdateSec > 0f) whisperManager.stepSec = partialUpdateSec;
 
-        _stream.OnResultUpdated += OnResultUpdated;
-        _stream.OnSegmentFinished += OnSegmentFinished;
+        stream = await whisperManager.CreateStream(microphoneRecord);
+        if (this == null) return; // destroyed while the model was loading
 
-        Debug.Log("<color=cyan><b>[Whisper Ready]</b> Press SPACEBAR to start continuous listening.</color>");
+        if (stream == null)
+        {
+            ShowMessage("Speech recognition failed to load. Is the Whisper model file in StreamingAssets?");
+            enabled = false;
+            return;
+        }
+
+        stream.OnSegmentUpdated += HandleSegmentUpdated;
+        stream.OnSegmentFinished += HandleSegmentFinished;
+
+        if (listenOnStart) StartListening();
     }
 
-    private void Update()
+    public void StartListening()
     {
-        // Toggle listening strictly via Spacebar
-        if (_stream != null && Input.GetKeyDown(KeyCode.Space))
-        {
-            if (_isListening)
-            {
-                _isListening = false;
-                _stream.StopStream();
-                if (microphoneRecord.IsRecording) microphoneRecord.StopRecord();
-                Debug.Log("<color=yellow><b>[Stopped]</b> Stopped listening by user input.</color>");
-            }
-            else
-            {
-                _isListening = true;
-                microphoneRecord.StartRecord();
-                _stream.StartStream();
-                Debug.Log("<color=green><b>[Listening Continuously...]</b> Speak anytime. Press SPACEBAR to stop.</color>");
-            }
-        }
-
-        // Handle Command Cooldown Timer
-        if (_commandCooldown > 0f)
-        {
-            _commandCooldown -= Time.deltaTime;
-            if (_commandCooldown <= 0f)
-            {
-                _lastCommand = ""; // Clear memory so same command can be said again later
-            }
-        }
-
-        // Handle Active Movement Over Time (Grounded on XZ plane)
-        if (_moveTimer > 0f)
-        {
-            bodyTransform.Translate(_moveDirection * moveSpeed * Time.deltaTime, Space.World);
-            _moveTimer -= Time.deltaTime;
-        }
+        if (stream == null || listening) return;
+        listening = true;
+        if (!microphoneRecord.enabled) microphoneRecord.enabled = true;
+        if (!microphoneRecord.IsRecording) microphoneRecord.StartRecord();
+        stream.StartStream();
+        ShowHeard("");
     }
 
-    private void OnResultUpdated(string partialResult)
+    public void StopListening()
     {
-        // Optional live preview
+        if (stream == null || !listening) return;
+        listening = false;
+        stream.StopStream();
+        if (microphoneRecord.IsRecording) microphoneRecord.StopRecord();
     }
 
-    private void OnSegmentFinished(WhisperResult result)
+    public void ToggleListening()
     {
-        if (result != null && !string.IsNullOrWhiteSpace(result.Result))
-        {
-            string spokenText = result.Result.Trim().ToLower();
-            Debug.Log($"<color=green><b>[Sentence Completed]:</b> {spokenText}</color>");
+        if (listening) StopListening(); else StartListening();
+    }
 
-            ParseAndExecuteCommand(spokenText);
-        }
-
-        // Ensure microphone stays recording if session is active
-        if (_isListening && microphoneRecord != null && !microphoneRecord.IsRecording)
+    void Update()
+    {
+        // Safety net: if the microphone stopped on its own (whisper.unity then stops the stream too),
+        // start both again. A disabled MicrophoneRecord counts as deliberately muted.
+        if (listening && stream != null && microphoneRecord.enabled && !microphoneRecord.IsRecording)
         {
             microphoneRecord.StartRecord();
+            stream.StartStream();
         }
     }
 
-    private void ParseAndExecuteCommand(string command)
+    void HandleSegmentUpdated(WhisperResult segment)
     {
-        // Ignore duplicate overlapping triggers within a 1.5 second window
-        if (command == _lastCommand && _commandCooldown > 0f) return;
-
-        _lastCommand = command;
-        _commandCooldown = 1.5f; // Lock out identical triggers for 1.5 seconds
-
-        bool useViewDirection = command.Contains("looking") || command.Contains("where i look") || command.Contains("view");
-        
-        Vector3 forwardRef = useViewDirection ? GetFlatDirection(vrCameraTransform.forward) : bodyTransform.forward;
-        Vector3 rightRef = useViewDirection ? GetFlatDirection(vrCameraTransform.right) : bodyTransform.right;
-
-        if (command.Contains("forward") || command.Contains("move forward"))
-        {
-            _moveDirection = forwardRef;
-            _moveTimer = moveDuration;
-            Debug.Log("<color=magenta>Command: Moving Forward</color>");
-        }
-        else if (command.Contains("backward") || command.Contains("back"))
-        {
-            _moveDirection = -forwardRef;
-            _moveTimer = moveDuration;
-            Debug.Log("<color=magenta>Command: Moving Backward</color>");
-        }
-        else if (command.Contains("left"))
-        {
-            _moveDirection = -rightRef;
-            _moveTimer = moveDuration;
-            Debug.Log("<color=magenta>Command: Moving Left</color>");
-        }
-        else if (command.Contains("right"))
-        {
-            _moveDirection = rightRef;
-            _moveTimer = moveDuration;
-            Debug.Log("<color=magenta>Command: Moving Right</color>");
-        }
+        if (segment == null) return;
+        router.OnPartial(segment.Result);
     }
 
-    private Vector3 GetFlatDirection(Vector3 sourceDir)
+    void HandleSegmentFinished(WhisperResult segment)
     {
-        sourceDir.y = 0;
-        return sourceDir.normalized;
+        if (segment == null) return;
+        router.OnFinal(segment.Result);
     }
 
-    private void OnDisable()
+    void SubmitHeard(string text)
     {
-        if (_stream != null)
-        {
-            _stream.OnResultUpdated -= OnResultUpdated;
-            _stream.OnSegmentFinished -= OnSegmentFinished;
+        ShowHeard(text);
+        resolver.SubmitUtterance(text);
+    }
 
-            if (_isListening)
-            {
-                _stream.StopStream();
-                if (microphoneRecord != null && microphoneRecord.IsRecording)
-                {
-                    microphoneRecord.StopRecord();
-                }
-                _isListening = false;
-            }
+    void ShowHeard(string text)
+    {
+        heardLine = text;
+        messageLine = "";
+        Refresh();
+    }
+
+    void ShowMessage(string message)
+    {
+        messageLine = message;
+        Refresh();
+    }
+
+    void Refresh()
+    {
+        if (statusText == null) return;
+        statusText.text = (string.IsNullOrEmpty(heardLine) ? "" : "Heard: " + heardLine) +
+                          (string.IsNullOrEmpty(messageLine) ? "" : "\n" + messageLine);
+    }
+
+    bool resumeOnEnable;
+
+    void OnEnable()
+    {
+        if (resumeOnEnable) { resumeOnEnable = false; StartListening(); }
+    }
+
+    void OnDisable()
+    {
+        resumeOnEnable = listening;
+        StopListening();
+    }
+
+    void OnDestroy()
+    {
+        if (stream != null)
+        {
+            stream.OnSegmentUpdated -= HandleSegmentUpdated;
+            stream.OnSegmentFinished -= HandleSegmentFinished;
+        }
+        if (resolver != null)
+        {
+            resolver.OnClarificationNeeded -= ShowMessage;
+            resolver.OnStatus -= ShowMessage;
+            resolver.OnError -= ShowMessage;
         }
     }
 }

@@ -6,19 +6,7 @@ For the whole-project setup, see the [repository README](../README.md).
 
 ## Install
 
-1. In your Unity project, create `Assets/Editor/`. The name matters: these scripts use `UnityEditor` and only compile from a folder called `Editor`.
-2. Copy all six `.cs` files from this folder into it:
-
-   | File | Role |
-   |---|---|
-   | `WorldKit.cs` | Shared helpers (walls with doorways, tags, colours). **Required by the generators.** |
-   | `HouseGenerator.cs` | House world |
-   | `MazeGenerator.cs` | Maze world |
-   | `PlainGenerator.cs` | Plain world |
-   | `WorldBuilder.cs` | Builds all three into one scene |
-   | `CollisionCheck.cs` | Verifies the worlds are solid |
-
-3. Wait for Unity to compile. A **Tools > ROVR** menu appears.
+On this branch the scripts are already in the Unity project, in `Assets/Editor/`. Unity only compiles them from a folder named `Editor`, because they use `UnityEditor`. `WorldKit.cs` is required by the generators. The **Tools > ROVR** menu appears once Unity has compiled.
 
 ## Menu
 
@@ -72,7 +60,7 @@ The generators create these tags automatically.
 | `Furniture` | All other House furnishings | No |
 | `Goal` | The Maze's goal trigger | No |
 
-What the LLM can see is set by `groundedTags` on `FOVMetadataGrounding` (in `Unity Navigation/`), not by these scripts. Furniture and Goal are left out so each world's metadata matches the thesis (§7.1.2). Add a tag to that list to expose it.
+What the LLM can see is set by `groundedTags` on `FOVMetadataGrounding` (in `Assets/ROVR/`), not by these scripts. Furniture and Goal are left out so each world's metadata matches the thesis (§7.1.2). Add a tag to that list to expose it.
 
 ## Collision
 

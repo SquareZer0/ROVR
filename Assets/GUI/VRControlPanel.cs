@@ -42,9 +42,17 @@ public class VRControlPanel : MonoBehaviour
     {
         if (destination != null)
         {
-            // Temporarily disable character controller if present, then move
+            // Stop any voice command still moving the player, or it carries on in the new world.
+            var resolver = playerBody.GetComponent<ROVR.SemanticIntentResolver>();
+            if (resolver != null) resolver.HaltNow();
+
+            // A CharacterController overrides a direct position change unless it's off while moving.
+            var controller = playerBody.GetComponent<CharacterController>();
+            if (controller != null) controller.enabled = false;
             playerBody.position = destination.position;
             playerBody.rotation = destination.rotation;
+            if (controller != null) controller.enabled = true;
+
             Debug.Log($"<color=blue><b>[Teleport]</b> Moved player to {destination.name}</color>");
         }
         else
@@ -55,6 +63,18 @@ public class VRControlPanel : MonoBehaviour
 
     private void ToggleMicMute()
     {
+        // Voice input owns the microphone and the transcription stream: stopping only the microphone
+        // also stops whisper.unity's stream, which then never restarts on unmute.
+        var voice = playerBody != null ? playerBody.GetComponent<WhisperVoiceMovement>() : null;
+        if (voice != null)
+        {
+            voice.ToggleListening();
+            _isMicMuted = !voice.IsListening;
+            if (micButtonText != null) micButtonText.text = _isMicMuted ? "Unmute Mic" : "Mute Mic";
+            Debug.Log(_isMicMuted ? "<color=yellow><b>[Mic Muted]</b></color>" : "<color=green><b>[Mic Unmuted]</b></color>");
+            return;
+        }
+
         if (microphoneRecord == null) return;
 
         _isMicMuted = !_isMicMuted;
